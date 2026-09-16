@@ -8,20 +8,20 @@ Physical layout (2 rows: 4 pads + 4 knobs each):
   Bottom: P1 P2 P3 P4 | K5 K6 K7 K8
 
 Note mode (notes 36-43):
-  P1 36  MPV play/stop      P5 40  MPV kill
-  P2 37  MPV next           P6 41  MPV prev
-  P3 38  VLC subs           P7 42  Fine scrub (hold)
-  P4 39  VLC play/stop      P8 43  VLC save+quit
+  P1 36  VLC audio launch/toggle   P5 40  VLC audio save+quit
+  P2 37  MPV next                 P6 41  MPV prev
+  P3 38  VLC subs                 P7 42  Fine scrub (hold)
+  P4 39  VLC video launch/toggle  P8 43  VLC video save+quit
 
 Prog Chng mode (programs 0-7):
-  P1 0  Toggle monitors     P5 4  Suspend
-  P2 1  Toggle mute         P6 5  Screenshot
-  P3 2  Restart OBS         P7 6  Play/pause
-  P4 3  Toggle monitors     P8 7  Brightness down
+  P1 0  Toggle monitors     P5 4  UNSET
+  P2 1  Toggle mute         P6 5  UNSET
+  P3 2  Restart OBS         P7 6  UNSET
+  P4 3  Toggle monitors     P8 7  UNSET
 
 Knobs (CC):
-  K3  VLC absolute seek (0-100%)
-  K4  VLC jog/shuttle
+  K3  VLC (video) absolute seek (0-100%)
+  K4  VLC (video) jog/shuttle
   K5  MPV scrub
   K8  Volume
 
@@ -49,11 +49,6 @@ keyboard = Controller()
 MPV_SOCKET_PATH = "/tmp/mpvsocket"
 MPV_PLAYLIST = "/home/davix/Documents/allmusic.m3u"
 
-VLC_HOST = "127.0.0.1"
-VLC_PORT = 4212
-VLC_PLAYLIST = "/home/davix/Documents/video.m3u"
-VLC_RESUME_FILE = "/home/davix/.vlc_resume_position"
-
 SCREENSHOT_PATH = "/home/davix/sofa_screenshot.png"
 OBS_RESTART_SCRIPT = "/home/davix/.local/bin/restart-obs.sh"
 
@@ -75,10 +70,6 @@ PORT_NAME = find_port()
 
 # ============================================================
 # Utils
-#   1. make_key_action        - single keypress
-#   2. make_shift_key_action  - shift + keypress
-#   3. make_screenshot_action - spectacle screenshot
-#   4. make_monitor_toggle_action - DPMS on/off toggle (stateful)
 # ============================================================
 
 def make_key_action(key):
@@ -131,12 +122,6 @@ def make_monitor_toggle_action():
 
 # ============================================================
 # Scrub engine (shared by MPV scrub knob)
-#   1. scrub_delta  - absolute CC value -> relative movement
-#   2. scrub_seconds - movement -> seek amount (speed-sensitive)
-#
-# Pad 7 / note 42 is a momentary fine-scrub modifier.
-#   Normal mode: speed-sensitive scrubbing.
-#   Fine mode:   exactly 1 second per MIDI step.
 # ============================================================
 
 fine_scrub = False
@@ -147,15 +132,6 @@ _scrub_state = {
 
 
 def scrub_delta(control, value):
-    """
-    Convert an absolute MIDI CC value into relative movement.
-
-    The LPD8 sends CC values from 0-127. This calculates how many
-    steps the knob moved since the previous message.
-
-    Handles 127 -> 0 and 0 -> 127 wrap-around.
-    """
-
     state = _scrub_state[control]
 
     now = time.monotonic()
@@ -171,7 +147,6 @@ def scrub_delta(control, value):
 
     delta = value - previous
 
-    # Handle wrap-around at the ends of the MIDI range.
     if delta > 64:
         delta -= 128
     elif delta < -64:
@@ -186,20 +161,6 @@ def scrub_delta(control, value):
 
 
 def scrub_seconds(delta, elapsed):
-    """
-    Convert knob movement into a relative seek amount.
-
-    Fine mode:
-        1 second per MIDI step.
-
-    Normal mode:
-        < 2 steps/sec     = 1 sec/step
-        < 5 steps/sec     = 2 sec/step
-        < 10 steps/sec    = 5 sec/step
-        < 20 steps/sec    = 15 sec/step
-        >= 20 steps/sec   = 30 sec/step
-    """
-
     if delta == 0:
         return 0
 
@@ -240,9 +201,6 @@ def fine_scrub_release():
 
 # ============================================================
 # MPV
-#   1. send_mpv_command    - generic IPC sender, used elsewhere
-#   2. toggle_or_launch_mpv - entry point (Pad 1 / Note mode)
-#   3. mpv_seek_scrub_knob  - entry point (Knob 5)
 # ============================================================
 
 def send_mpv_command(command):
@@ -298,255 +256,218 @@ def mpv_seek_scrub_knob(value):
 
 
 # ============================================================
-# VLC
-#   1. get_vlc_socket         - shared connection helper
-#   2. _vlc_rc_send            - thread-safe command send + drain
-#   3. launch_or_toggle_vlc    - entry point (Pad 4 / Note mode)
-#   4. vlc_save_and_quit       - entry point (Pad 8 / Note mode)
-#   5. vlc_absolute_seek_knob  - entry point (Knob 3, 0-100%)
-#   6. vlc_jog_knob            - entry point (Knob 4, jog/shuttle)
+# VLC — per-instance class
 # ============================================================
 
-_vlc_socket = None
-_vlc_lock = threading.Lock()
+class VLCInstance:
+    def __init__(self, name, host, port, playlist, resume_file, extra_args=None):
+        self.name = name
+        self.host = host
+        self.port = port
+        self.playlist = playlist
+        self.resume_file = resume_file
+        self.extra_args = extra_args or []
+        self.socket = None
+        self.lock = threading.Lock()
+        self.process = None
 
+    def get_socket(self):
+        if self.socket is None:
+            try:
+                self.socket = socket.create_connection(
+                    (self.host, self.port), timeout=0.3
+                )
+                self.socket.settimeout(0.2)
+                while True:
+                    try:
+                        chunk = self.socket.recv(4096)
+                        if not chunk:
+                            break
+                    except socket.timeout:
+                        break
+            except OSError:
+                self.socket = None
+        return self.socket
 
-def get_vlc_socket():
-    global _vlc_socket
+    def rc_send(self, command):
+        with self.lock:
+            s = self.get_socket()
+            if s is None:
+                return None
+            try:
+                s.sendall(f"{command}\n".encode())
+                try:
+                    return s.recv(4096)
+                except socket.timeout:
+                    return None
+            except OSError:
+                self.socket = None
+                return None
 
-    if _vlc_socket is None:
-        try:
-            _vlc_socket = socket.create_connection(
-                (VLC_HOST, VLC_PORT),
-                timeout=0.3,
+    def raise_window(self):
+        if self.process is not None:
+            subprocess.Popen(
+                ["xdotool", "search", "--pid", str(self.process.pid), "windowactivate"]
             )
 
-            _vlc_socket.settimeout(0.2)
-
-            # Drain VLC CLI banner.
-            while True:
-                try:
-                    chunk = _vlc_socket.recv(4096)
-
-                    if not chunk:
-                        break
-
-                except socket.timeout:
-                    break
-
-        except OSError:
-            _vlc_socket = None
-
-    return _vlc_socket
-
-
-def _vlc_rc_send(command):
-    """Send one rc command and drain its response. Thread-safe."""
-    global _vlc_socket
-
-    with _vlc_lock:
-        s = get_vlc_socket()
-
-        if s is None:
+    def launch_or_toggle(self):
+        try:
+            with socket.create_connection(
+                (self.host, self.port), timeout=0.3
+            ) as s:
+                s.sendall(b"pause\n")
+            print(f"VLC [{self.name}]: toggled play/pause")
             return
-
-        try:
-            s.sendall(f"{command}\n".encode())
-
-            try:
-                s.recv(1024)
-            except socket.timeout:
-                pass
-
-        except OSError:
-            _vlc_socket = None
-
-
-def launch_or_toggle_vlc():
-    # If VLC is already running and listening, toggle play/pause.
-    try:
-        with socket.create_connection(
-            (VLC_HOST, VLC_PORT),
-            timeout=0.3,
-        ) as s:
-            s.sendall(b"pause\n")
-
-        print("VLC: toggled play/pause")
-        return
-
-    except (ConnectionRefusedError, TimeoutError, OSError):
-        pass
-
-    print("VLC: launching")
-
-    resume_index = None
-    resume_time = None
-
-    if os.path.exists(VLC_RESUME_FILE):
-        try:
-            with open(VLC_RESUME_FILE) as f:
-                lines = f.read().splitlines()
-
-            if (
-                len(lines) >= 2
-                and lines[0].isdigit()
-                and lines[1].isdigit()
-            ):
-                resume_time = lines[0]
-                resume_index = lines[1]
-
-            os.remove(VLC_RESUME_FILE)
-
-        except OSError:
+        except (ConnectionRefusedError, TimeoutError, OSError):
             pass
 
-    args = [
-        "vlc",
-        "--extraintf=rc",
-        f"--rc-host={VLC_HOST}:{VLC_PORT}",
-        "--fullscreen",
-        "--no-spu",
-        "--avcodec-hw=none",
-        "--no-random",
-        VLC_PLAYLIST,
-    ]
+        print(f"VLC [{self.name}]: launching")
 
-    subprocess.Popen(args)
+        resume_index = None
+        resume_time = None
 
-    if resume_index and resume_time:
+        if os.path.exists(self.resume_file):
+            try:
+                with open(self.resume_file) as f:
+                    lines = f.read().splitlines()
+                if (
+                    len(lines) >= 2
+                    and lines[0].isdigit()
+                    and lines[1].isdigit()
+                ):
+                    resume_time = lines[0]
+                    resume_index = lines[1]
+                os.remove(self.resume_file)
+            except OSError:
+                pass
 
-        def resume():
-            for _ in range(20):
-                try:
-                    with socket.create_connection(
-                        (VLC_HOST, VLC_PORT),
-                        timeout=0.5,
-                    ) as s:
+        args = [
+            "vlc",
+            "--extraintf=rc",
+            f"--rc-host={self.host}:{self.port}",
+            "--no-random",
+            *self.extra_args,
+            self.playlist,
+        ]
 
-                        s.settimeout(0.3)
+        self.process = subprocess.Popen(args)
 
-                        # Drain VLC CLI banner.
-                        while True:
-                            try:
-                                chunk = s.recv(4096)
-
-                                if not chunk:
+        if resume_index and resume_time:
+            def resume():
+                for _ in range(20):
+                    try:
+                        with socket.create_connection(
+                            (self.host, self.port), timeout=0.5
+                        ) as s:
+                            s.settimeout(0.3)
+                            while True:
+                                try:
+                                    chunk = s.recv(4096)
+                                    if not chunk:
+                                        break
+                                except socket.timeout:
                                     break
+                            s.sendall(f"goto {resume_index}\n".encode())
+                            time.sleep(0.3)
+                            s.sendall(f"seek {resume_time}\n".encode())
+                        return
+                    except (ConnectionRefusedError, OSError):
+                        time.sleep(0.5)
 
-                            except socket.timeout:
-                                break
+            threading.Thread(target=resume, daemon=True).start()
 
-                        s.sendall(
-                            f"goto {resume_index}\n".encode()
-                        )
-
-                        time.sleep(0.3)
-
-                        s.sendall(
-                            f"seek {resume_time}\n".encode()
-                        )
-
-                    return
-
-                except (ConnectionRefusedError, OSError):
-                    time.sleep(0.5)
-
-        threading.Thread(
-            target=resume,
-            daemon=True,
-        ).start()
-
-
-def vlc_save_and_quit():
-    try:
-        with socket.create_connection(
-            (VLC_HOST, VLC_PORT),
-            timeout=0.3,
-        ) as s:
-
-            s.settimeout(0.2)
-
-            # Drain VLC's CLI banner.
-            while True:
-                try:
-                    chunk = s.recv(4096)
-
-                    if not chunk:
+    def save_and_quit(self):
+        try:
+            with socket.create_connection(
+                (self.host, self.port), timeout=0.3
+            ) as s:
+                s.settimeout(0.2)
+                while True:
+                    try:
+                        chunk = s.recv(4096)
+                        if not chunk:
+                            break
+                    except socket.timeout:
                         break
 
-                except socket.timeout:
-                    break
+                s.settimeout(0.5)
 
-            s.settimeout(0.5)
+                s.sendall(b"get_time\n")
+                time_resp = s.recv(1024).decode().strip()
+                time_parts = time_resp.split()
+                current_time = next(
+                    (p for p in reversed(time_parts) if p.isdigit()), None
+                )
 
-            # Get current playback time.
-            s.sendall(b"get_time\n")
-            time_resp = s.recv(1024).decode().strip()
+                s.sendall(b"playlist\n")
+                playlist_resp = s.recv(4096).decode()
 
-            time_parts = time_resp.split()
+                current_index = None
+                for line in playlist_resp.splitlines():
+                    line = line.strip()
+                    if line.startswith("|") and "*" in line:
+                        after_pipe = line.split("*", 1)
+                        if len(after_pipe) > 1:
+                            num_str = after_pipe[1].split("-", 1)[0].strip()
+                            if num_str.isdigit():
+                                current_index = num_str
+                                break
 
-            current_time = next(
-                (p for p in reversed(time_parts) if p.isdigit()),
-                None,
-            )
+                if current_time and current_index:
+                    with open(self.resume_file, "w") as f:
+                        f.write(f"{current_time}\n{current_index}")
 
-            # Get playlist and current item.
-            s.sendall(b"playlist\n")
-            playlist_resp = s.recv(4096).decode()
+        except Exception:
+            pass
 
-            current_index = None
+        if self.process is not None:
+            self.process.terminate()
+            try:
+                self.process.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                print(f"VLC [{self.name}]: terminate timed out, killing")
+                self.process.kill()
+                self.process.wait()
+            self.process = None
+        else:
+            print(f"VLC [{self.name}]: no tracked PID — kill manually")
 
-            for line in playlist_resp.splitlines():
-                line = line.strip()
 
-                if line.startswith("|") and "*" in line:
-                    after_pipe = line.split("*", 1)
+AUDIO_VLC = VLCInstance(
+    name="audio",
+    host="127.0.0.1",
+    port=4213,
+    playlist="/home/davix/Documents/audio.m3u",
+    resume_file="/home/davix/.vlc_audio_resume",
+    extra_args=["--intf", "dummy", "--no-video"],
+)
 
-                    if len(after_pipe) > 1:
-                        num_str = (
-                            after_pipe[1]
-                            .split("-", 1)[0]
-                            .strip()
-                        )
+VIDEO_VLC = VLCInstance(
+    name="video",
+    host="127.0.0.1",
+    port=4212,
+    playlist="/home/davix/Documents/video.m3u",
+    resume_file="/home/davix/.vlc_video_resume",
+    extra_args=["--fullscreen", "--no-spu", "--avcodec-hw=none"],
+)
 
-                        if num_str.isdigit():
-                            current_index = num_str
-                            break
 
-            if current_time and current_index:
-                with open(VLC_RESUME_FILE, "w") as f:
-                    f.write(
-                        f"{current_time}\n{current_index}"
-                    )
-
-    except Exception:
-        pass
-
-    subprocess.Popen(["pkill", "-f", "vlc"])
+def video_toggle_and_raise():
+    VIDEO_VLC.launch_or_toggle()
+    VIDEO_VLC.raise_window()
 
 
 def vlc_absolute_seek_knob(value):
     pct = round(value / 127 * 100)
-    _vlc_rc_send(f"seek {pct}%")
-    print(f"VLC seek: {pct}%")
+    VIDEO_VLC.rc_send(f"seek {pct}%")
+    print(f"VLC video seek: {pct}%")
 
 
-# --- Knob 4: jog/shuttle wheel ---
-#
-#   0-15    fast fast rewind  (repeated -10s seeks)
-#   16-31   fast rewind       (repeated -3s seeks)
-#   32-47   slow rewind       (repeated -1s seeks)
-#   48-79   normal play       (rate 1, dead zone — tune width by feel)
-#   80-95   step forward      (single frame step)
-#   96-111  fast forward      (rate 2)
-#   112-127 fast fast forward (rate 4)
-#
-# True reverse playback isn't reliably supported by VLC, so
-# rewind zones are simulated with a repeating timer thread
-# doing small backward seeks rather than negative playback rate.
+# --- Knob 4: jog/shuttle wheel (video instance) ---
 
 _vlc_jog_state = {
     "zone": None,
+    "value": None,
     "stop_event": None,
     "thread": None,
 }
@@ -582,7 +503,7 @@ def _vlc_jog_start_repeat(command, interval):
 
     def loop():
         while not stop_event.wait(interval):
-            _vlc_rc_send(command)
+            VIDEO_VLC.rc_send(command)
 
     t = threading.Thread(target=loop, daemon=True)
 
@@ -595,7 +516,6 @@ def _vlc_jog_start_repeat(command, interval):
 def vlc_jog_knob(value):
     zone = _vlc_jog_classify(value)
 
-    # Fine frame positioning: one frame per knob movement.
     if 80 <= value <= 85:
         previous = _vlc_jog_state["value"]
 
@@ -603,16 +523,15 @@ def vlc_jog_knob(value):
 
         if previous is not None and 80 <= previous <= 85:
             if value > previous:
-                _vlc_rc_send("key frame-next")
+                VIDEO_VLC.rc_send("key frame-next")
             elif value < previous:
-                _vlc_rc_send("key frame-prev")
+                VIDEO_VLC.rc_send("key frame-prev")
 
         _vlc_jog_state["zone"] = zone
         _vlc_jog_state["value"] = value
         return
 
     if zone == _vlc_jog_state["zone"]:
-        # Frame shuttle speed follows the knob position.
         if zone == "step_forward":
             _vlc_jog_stop_repeat()
 
@@ -626,7 +545,7 @@ def vlc_jog_knob(value):
     _vlc_jog_state["zone"] = zone
     _vlc_jog_state["value"] = value
 
-    print(f"VLC jog: {zone}")
+    print(f"VLC video jog: {zone}")
 
     if zone == "ff_rewind":
         _vlc_jog_start_repeat("seek -10", 0.3)
@@ -635,19 +554,17 @@ def vlc_jog_knob(value):
     elif zone == "slow_rewind":
         _vlc_jog_start_repeat("seek -1", 0.4)
     elif zone == "normal":
-        _vlc_rc_send("rate 1")
-        _vlc_rc_send("play")
+        VIDEO_VLC.rc_send("rate 1")
+        VIDEO_VLC.rc_send("play")
     elif zone == "step_forward":
-        # Accelerating frame shuttle: 86 = slow, 95 = fast.
-        # Smaller interval = faster frame stepping.
         interval = 0.25 - ((value - 86) / 9.0) * 0.20
         _vlc_jog_start_repeat("key frame-next", interval)
     elif zone == "fast_forward":
-        _vlc_rc_send("rate 2")
-        _vlc_rc_send("play")
+        VIDEO_VLC.rc_send("rate 2")
+        VIDEO_VLC.rc_send("play")
     elif zone == "ff_forward":
-        _vlc_rc_send("rate 4")
-        _vlc_rc_send("play")
+        VIDEO_VLC.rc_send("rate 4")
+        VIDEO_VLC.rc_send("play")
 
 
 # ============================================================
@@ -655,8 +572,8 @@ def vlc_jog_knob(value):
 # ============================================================
 
 PAD_PRESS = {
-    # Pad 1 - MPV go / stop
-    36: toggle_or_launch_mpv,
+    # Pad 1 - VLC audio launch / toggle
+    36: AUDIO_VLC.launch_or_toggle,
 
     # Pad 2 - MPV next
     37: send_mpv_command(["playlist-next"]),
@@ -664,11 +581,11 @@ PAD_PRESS = {
     # Pad 3 - VLC toggle subtitles
     38: make_shift_key_action("v"),
 
-    # Pad 4 - VLC go / stop
-    39: launch_or_toggle_vlc,
+    # Pad 4 - VLC video launch / toggle + raise window
+    39: video_toggle_and_raise,
 
-    # Pad 5 - Kill MPV
-    40: send_mpv_command(["quit"]),
+    # Pad 5 - VLC audio save state + quit
+    40: AUDIO_VLC.save_and_quit,
 
     # Pad 6 - MPV previous
     41: send_mpv_command(["playlist-prev"]),
@@ -676,8 +593,8 @@ PAD_PRESS = {
     # Pad 7 - Fine scrub modifier
     42: fine_scrub_press,
 
-    # Pad 8 - Save VLC position and quit
-    43: vlc_save_and_quit,
+    # Pad 8 - VLC video save state + quit
+    43: VIDEO_VLC.save_and_quit,
 }
 
 
@@ -691,8 +608,6 @@ PAD_RELEASE = {
 # Pad mappings — Prog Chng mode
 # ============================================================
 
-# Pads 1 and 4 share one toggle instance so both presses
-# operate on the same on/off state.
 _monitor_toggle_action = make_monitor_toggle_action()
 
 PAD_PROGRAM_PRESS = {
@@ -727,10 +642,10 @@ def volume_knob(value):
 
 
 CC_HANDLERS = {
-    # Knob 3 - VLC absolute seek (0-100%)
+    # Knob 3 - VLC video absolute seek (0-100%)
     3: vlc_absolute_seek_knob,
 
-    # Knob 4 - VLC jog/shuttle
+    # Knob 4 - VLC video jog/shuttle
     4: vlc_jog_knob,
 
     # Knob 5 - MPV scrub
@@ -748,8 +663,6 @@ CC_HANDLERS = {
 def handle_message(msg):
     if msg.type == "note_on":
 
-        # Some MIDI devices represent note-off as note_on
-        # with velocity 0.
         if msg.velocity == 0:
             action = PAD_RELEASE.get(msg.note)
 
