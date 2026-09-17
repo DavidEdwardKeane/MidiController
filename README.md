@@ -79,15 +79,6 @@ Debian/Ubuntu-based systems may prefer the system packages instead:
 sudo apt install python3-mido python3-pynput python3-rtmidi
 ```
 
-### Building the package
-
-`install.sh` generates the full `midi_controller/` package (all files listed above) plus the thin `lpd8_mapper.py` entry point from scratch, writing everything under a hard-coded `BASE` path near the top of the script. Edit `BASE` to match your environment, then:
-
-```
-bash install.sh
-```
-
-This is idempotent — rerunning it regenerates every file from the same source-of-truth content, overwriting any local edits.
 
 ---
 
@@ -312,7 +303,6 @@ spectacle -b -o /tmp/test-screenshot.png -m -n
 
 ## Known limitations
 
-- Hard-coded, user-specific absolute paths throughout `config.py` — must be edited before use on another machine.
 - `xdotool`-based window raising requires X11; no Wayland path exists yet.
 - PROG CHNG programs 4–7 are intentionally unmapped.
 - `save_and_quit()` blocks the calling thread for up to ~3 seconds if VLC doesn't respond to `SIGTERM` promptly, before falling back to `SIGKILL`. Since this runs inside the MIDI message-handling loop, a hung VLC process delays processing of the next pad/knob event for that window.
