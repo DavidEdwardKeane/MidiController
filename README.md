@@ -44,7 +44,6 @@ Three operating modes, switched via the corresponding buttons on the device:
 MidiController/
 ├── lpd8_mapper.py              # entry point only
 ├── midi_listen.py              # standalone debug utility — dumps raw MIDI messages
-├── install.sh                  # generates the package below from scratch
 └── midi_controller/
     ├── __init__.py
     ├── config.py                # paths, ports, playlists — all constants
@@ -56,6 +55,8 @@ MidiController/
     ├── mappings.py              # PAD_PRESS / PAD_RELEASE / PAD_PROGRAM_PRESS / CC_HANDLERS
     └── dispatcher.py            # find_port, handle_message, main()
 ```
+
+There is no installer script — clone the repo, install dependencies, edit `midi_controller/config.py` to match your own media locations, and run `lpd8_mapper.py` directly.
 
 ---
 
@@ -79,26 +80,29 @@ Debian/Ubuntu-based systems may prefer the system packages instead:
 sudo apt install python3-mido python3-pynput python3-rtmidi
 ```
 
-
 ---
 
 ## Configuration
 
-Constants live in `midi_controller/config.py`:
+Constants live in `midi_controller/config.py`. Paths are built from the current user's home directory via `pathlib.Path.home()`, so nothing user-specific needs editing on a fresh clone unless your media lives somewhere other than `~/Documents`:
 
 ```python
-MPV_SOCKET_PATH = "/tmp/mpvsocket"
-MPV_PLAYLIST = "/home/davix/Documents/allmusic.m3u"
+from pathlib import Path
 
-SCREENSHOT_PATH = "/home/davix/sofa_screenshot.png"
-OBS_RESTART_SCRIPT = "/home/davix/.local/bin/restart-obs.sh"
+HOME = Path.home()
+
+MPV_SOCKET_PATH = "/tmp/mpvsocket"
+MPV_PLAYLIST = str(HOME / "Documents" / "allmusic.m3u")
+
+SCREENSHOT_PATH = str(HOME / "sofa_screenshot.png")
+OBS_RESTART_SCRIPT = str(HOME / ".local" / "bin" / "restart-obs.sh")
 
 AUDIO_VLC_CONFIG = dict(
     name="audio",
     host="127.0.0.1",
     port=4213,
-    playlist="/home/davix/Documents/audio.m3u",
-    resume_file="/home/davix/.vlc_audio_resume",
+    playlist=str(HOME / "Documents" / "audio.m3u"),
+    resume_file=str(HOME / ".vlc_audio_resume"),
     extra_args=["--intf", "dummy", "--width=400", "--height=400"],
 )
 
@@ -106,13 +110,13 @@ VIDEO_VLC_CONFIG = dict(
     name="video",
     host="127.0.0.1",
     port=4212,
-    playlist="/home/davix/Documents/video.m3u",
-    resume_file="/home/davix/.vlc_video_resume",
+    playlist=str(HOME / "Documents" / "video.m3u"),
+    resume_file=str(HOME / ".vlc_video_resume"),
     extra_args=["--fullscreen", "--no-spu", "--avcodec-hw=none"],
 )
 ```
 
-Change these paths, ports, and playlists to match your system — they're hard-coded, not read from environment variables.
+Playlist filenames (`allmusic.m3u`, `audio.m3u`, `video.m3u`), the screenshot filename, and the OBS restart script path are still literal strings you may want to rename — only the *directory* portion is resolved relative to the current user automatically.
 
 ### VLC — audio instance
 
@@ -307,6 +311,7 @@ spectacle -b -o /tmp/test-screenshot.png -m -n
 - PROG CHNG programs 4–7 are intentionally unmapped.
 - `save_and_quit()` blocks the calling thread for up to ~3 seconds if VLC doesn't respond to `SIGTERM` promptly, before falling back to `SIGKILL`. Since this runs inside the MIDI message-handling loop, a hung VLC process delays processing of the next pad/knob event for that window.
 - Thread safety for VLC RC commands is enforced via a per-instance `threading.Lock()`, since the jog/shuttle repeat thread and other actions may issue commands concurrently.
+- Playlist filenames and the OBS/screenshot leaf paths in `config.py` are still literal strings — only directory roots are resolved via `Path.home()`.
 
 ---
 

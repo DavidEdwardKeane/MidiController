@@ -3,6 +3,7 @@ import socket
 import subprocess
 import threading
 import time
+import json
 
 from .config import AUDIO_VLC_CONFIG, VIDEO_VLC_CONFIG
 
@@ -75,11 +76,12 @@ class VLCInstance:
         if os.path.exists(self.resume_file):
             try:
                 with open(self.resume_file) as f:
-                    lines = f.read().splitlines()
-                if len(lines) >= 2 and lines[0].isdigit() and lines[1].isdigit():
-                    resume_time, resume_index = lines[0], lines[1]
-                os.remove(self.resume_file)
-            except OSError:
+                    all_state = json.load(f)
+                entry = all_state.get(self.name)
+                if entry:
+                    resume_time = entry.get("time")
+                    resume_index = entry.get("index")
+            except (OSError, json.JSONDecodeError):
                 pass
 
         args = [
@@ -144,8 +146,21 @@ class VLCInstance:
                                 break
 
                 if current_time and current_index:
+                    all_state = {}
+                    if os.path.exists(self.resume_file):
+                        try:
+                            with open(self.resume_file) as f:
+                                all_state = json.load(f)
+                        except (OSError, json.JSONDecodeError):
+                            all_state = {}
+
+                    all_state[self.name] = {
+                        "time": current_time,
+                        "index": current_index,
+                    }
+
                     with open(self.resume_file, "w") as f:
-                        f.write(f"{current_time}\n{current_index}")
+                        json.dump(all_state, f)
         except Exception:
             pass
 
