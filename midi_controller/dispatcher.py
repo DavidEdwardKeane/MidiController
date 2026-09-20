@@ -11,7 +11,25 @@ def find_port():
             return name
     raise RuntimeError("LPD8 not found — is it connected?")
 
+def get_outport():
+    global _outport
+    if _outport is None:
+        for name in mido.get_output_names():
+            if "LPD8" in name:
+                _outport = mido.open_output(name)
+                break
+    return _outport
 
+
+def light_pad(note, on=True):
+    outport = get_outport()
+    if outport is None:
+        return
+    if on:
+        outport.send(mido.Message('note_on', note=note, velocity=127))
+    else:
+        outport.send(mido.Message('note_off', note=note))
+        
 def handle_message(msg):
     if msg.type == "note_on":
         if msg.velocity == 0:

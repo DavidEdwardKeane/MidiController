@@ -5,7 +5,7 @@ import threading
 import time
 import json
 
-from .config import AUDIO_VLC_CONFIG, VIDEO_VLC_CONFIG
+from .config import VIDEO_VLC_CONFIG
 
 
 class VLCInstance:
@@ -133,34 +133,41 @@ class VLCInstance:
                 )
 
                 s.sendall(b"playlist\n")
-                playlist_resp = s.recv(4096).decode()
-                current_index = None
-                for line in playlist_resp.splitlines():
-                    line = line.strip()
-                    if line.startswith("|") and "*" in line:
-                        after_pipe = line.split("*", 1)
-                        if len(after_pipe) > 1:
-                            num_str = after_pipe[1].split("-", 1)[0].strip()
-                            if num_str.isdigit():
-                                current_index = num_str
-                                break
 
-                if current_time and current_index:
-                    all_state = {}
-                    if os.path.exists(self.resume_file):
-                        try:
-                            with open(self.resume_file) as f:
-                                all_state = json.load(f)
-                        except (OSError, json.JSONDecodeError):
-                            all_state = {}
+                playlist_resp = ""
+                s.settimeout(5.0)
+                deadline = time.monotonic() + 5.0
+                while time.monotonic() < deadline:
+                    try:
+                        chunk = s.recv(8192)
+                        if not chunk:
+                            break
+                        playlist_resp += chunk.decode(errors="replace")
+                        if playlist_resp.rstrip().endswith(">"):
+                            break
+                    except socket.timeout:
+                        break
 
-                    all_state[self.name] = {
-                        "time": current_time,
-                        "index": current_index,
-                    }
+            if current_time and current_index:
+                all_state = {}
+                if os.path.exists(self.resume_file):
+                    try:
+                        with open(self.resume_file) as f:
+                            all_state = json.load(f)
+                    except (OSError, json.JSONDecodeError):
+                        all_state = {}
 
-                    with open(self.resume_file, "w") as f:
-                        json.dump(all_state, f)
+                all_state[self.name] = {
+                    "time": current_time,
+                    "index": current_index,
+                }
+
+                with open(self.resume_file, "w") as f:
+                    json.dump(all_state, f)
+
+                print(f"VLC [{self.name}]: saved resume state -> {self.resume_file}")
+            else:
+                print(f"VLC [{self.name}]: no time/index captured, resume not saved (time={current_time}, index={current_index})")
         except Exception:
             pass
 
@@ -177,7 +184,6 @@ class VLCInstance:
             print(f"VLC [{self.name}]: no tracked PID — kill manually")
 
 
-AUDIO_VLC = VLCInstance(**AUDIO_VLC_CONFIG)
 VIDEO_VLC = VLCInstance(**VIDEO_VLC_CONFIG)
 
 
