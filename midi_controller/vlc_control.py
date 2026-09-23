@@ -225,6 +225,10 @@ def _vlc_jog_stop_repeat():
     _vlc_jog_state["thread"] = None
 
 
+def stop_video_jog():
+    _vlc_jog_stop_repeat()
+
+
 def _vlc_jog_start_repeat(command, interval):
     stop_event = threading.Event()
 
