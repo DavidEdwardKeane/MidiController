@@ -95,6 +95,8 @@ def handle_message(msg):
         action = PAD_RELEASE.get(msg.note)
         if action:
             action()
+        if msg.note in MODE_NOTES.values():
+            apply_mode_leds()
 
     elif msg.type == "control_change":
         handler = CC_HANDLERS.get(msg.control)
